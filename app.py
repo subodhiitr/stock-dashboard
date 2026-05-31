@@ -21,7 +21,7 @@ csv_file = "EQUITY_L_with_sector.csv"
 df_constituents = pd.read_csv(csv_file)
 
 # Initialize sector history persistence
-history_file = "C:/stocks/sector_health_history.csv"
+history_file = "sector_health_history.csv"
 if "sector_history" not in st.session_state:
     if os.path.exists(history_file):
         st.session_state["sector_history"] = pd.read_csv(history_file, parse_dates=["time"])
