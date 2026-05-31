@@ -17,7 +17,7 @@ def rate_health(score):
         return "🔴 Weak"
 
 # Load CSV with sector and ticker info
-csv_file = "C:/stocks/EQUITY_L_with_sector.csv"
+csv_file = "EQUITY_L_with_sector.csv"
 df_constituents = pd.read_csv(csv_file)
 
 # Initialize sector history persistence
@@ -28,6 +28,10 @@ if "sector_history" not in st.session_state:
     else:
         st.session_state["sector_history"] = pd.DataFrame(columns=["time", "Sector", "health_score_norm"])
 
+# At the top of your script
+def show_last_refresh(label):
+    st.caption(f"🕒 {label} — Last refreshed: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
 # Midcap index
 @st.cache_data(ttl=300)
 def fetch_midcap_data():
@@ -221,21 +225,28 @@ sectors = fetch_sector_data(selected_sectors)
 
 st.subheader("📊 Market Health Snapshot")
 st.dataframe(stocks)
+show_last_refresh("Market Health Snapshot")
+
 
 st.subheader("Sector Movements")
 st.dataframe(sectors)
+show_last_refresh("Sector Movements")
+
 
 st.subheader("📊 Sector Price Change (%)")
 fig_sector = px.bar(sectors, x="symbol", y="perChange",
                     title="Sectoral % Change",
                     color="perChange", color_continuous_scale="RdYlGn")
 st.plotly_chart(fig_sector, use_container_width=True)
+show_last_refresh("Sector Price Change")
+
 
 combined = pd.DataFrame()
 for sector in selected_sectors:
     st.subheader(f"📊 {sector}")
     sector_stocks = fetch_sector_stocks(sector)
     st.dataframe(sector_stocks)
+    show_last_refresh(f"{sector}")
     combined = pd.concat([combined, sector_stocks])
 
 if not combined.empty:
