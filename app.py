@@ -273,9 +273,14 @@ sector_options = sorted(df_constituents["Sector"].dropna().unique())
 default_sectors = sector_options[:2] if len(sector_options) >= 2 else sector_options
 selected_sectors = st.multiselect("Select sectors to track:", sector_options, default=default_sectors)
 
+# Force refresh when selection changes
+if "last_selected_sectors" not in st.session_state or st.session_state["last_selected_sectors"] != selected_sectors:
+    st.session_state["last_selected_sectors"] = selected_sectors
+    st.session_state["last_refresh_time"] = None   # invalidate cache
+
 refresh_needed, refresh_time = refresh_controller()
 
-if refresh_needed:
+if refresh_needed or st.session_state.get("last_refresh_time") is None:
     stocks = fetch_midcap_data()
     sectors = fetch_sector_data(selected_sectors)
     combined = pd.DataFrame()
