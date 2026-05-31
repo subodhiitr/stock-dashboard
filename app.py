@@ -3,7 +3,10 @@ import pandas as pd
 import plotly.express as px
 import yfinance as yf
 import os
+import pprint
 from streamlit_autorefresh import st_autorefresh
+from nsepython import nse_eq, index_info, nse_index
+
 
 # Health rating function
 def rate_health(score):
@@ -27,6 +30,24 @@ if "sector_history" not in st.session_state:
         st.session_state["sector_history"] = pd.read_csv(history_file, parse_dates=["time"])
     else:
         st.session_state["sector_history"] = pd.DataFrame(columns=["time", "Sector", "health_score_norm"])
+
+def refresh_controller():
+    data = yf.download("MIDCAP.NS", period="1d", interval="5m")
+    if data.empty:
+        data = yf.download("MIDCAP.NS", period="5d", interval="1d")
+    if data.empty:
+        return False, None
+
+    latest = data.iloc[-1]
+    last_time = latest.name
+
+    # Check if we already processed this timestamp
+    if "last_refresh_time" in st.session_state and st.session_state["last_refresh_time"] == last_time:
+        return False, last_time
+
+    # Update session_state
+    st.session_state["last_refresh_time"] = last_time
+    return True, last_time
 
 # At the top of your script
 def show_last_refresh(label):
@@ -57,8 +78,38 @@ def fetch_midcap_data():
         stocks["health_rating"] = stocks["health_score"].apply(rate_health)
         return stocks
     except Exception:
-        st.warning("⚠️ Rate limited by Yahoo Finance. Please wait and refresh.")
-        return pd.DataFrame()
+        # Fallback to NSEPython
+        try:
+            df_indices = nse_index()   # returns dict of all indices
+            #pprint.pprint(df_indices)
+
+            # Look for any index containing "MIDCAP"
+            midcap_rows = df_indices[df_indices["indexName"].str.contains("MIDCAP", case=False)]
+
+            if midcap_rows.empty:
+                available = df_indices["indexName"].tolist()
+                st.warning(f"⚠️ No Midcap index found. Available indices: {available}")
+                return pd.DataFrame()
+
+            # Take the first matching row
+            midcap = midcap_rows.iloc[0]
+            #pprint.pprint(midcap)
+            stocks = pd.DataFrame([{
+                "symbol": midcap["indexName"],          # "NIFTY MIDCAP 100"
+                "lastPrice": midcap["last"],            # use 'last' instead of 'lastPrice'
+                "dayHigh": midcap["high"],
+                "dayLow": midcap["low"],
+                "openPrice": midcap["open"],
+                "previousClose": midcap["previousClose"],
+                "yearLow": midcap["yearLow"],
+                "yearHigh": midcap["yearHigh"],
+                "percChange": midcap["percChange"]
+            }])
+            return stocks
+
+        except Exception as e:
+            st.warning(f"⚠️ Could not fetch Midcap data: {e}")
+            return pd.DataFrame()
 
 @st.cache_data(ttl=300)
 def fetch_sector_stocks(sector_name):
@@ -80,8 +131,32 @@ def fetch_sector_stocks(sector_name):
             if data.empty:
                 # Fallback to daily
                 data = yf.download(ticker, period="5d", interval="1d")
-
-            if data.empty:
+            if not data.empty:
+                latest = data.iloc[-1]
+                stock = {
+                    "symbol": ticker,
+                    "Sector": sector_name,
+                    "lastPrice": safe_scalar(latest["Close"]),
+                    "dayHigh": safe_scalar(latest["High"]),
+                    "dayLow": safe_scalar(latest["Low"]),
+                    "totalTradedVolume": safe_scalar(latest["Volume"])
+                }
+            else:
+                raise Exception("Empty Yahoo data")
+        except Exception:
+            # NSE fallback
+            try:
+                eq = nse_eq(ticker.replace(".NS", ""))
+                stock = {
+                    "symbol": ticker,
+                    "Sector": sector_name,
+                    "lastPrice": eq["priceInfo"]["lastPrice"],
+                    "dayHigh": eq["priceInfo"]["intraDayHighLow"]["max"],
+                    "dayLow": eq["priceInfo"]["intraDayHighLow"]["min"],
+                    "totalTradedVolume": eq["securityWiseDP"]["quantityTraded"]
+                }
+            except Exception as e:
+                st.warning(f"⚠️ Could not fetch {ticker}: {e}")
                 results.append({
                     "symbol": ticker,
                     "Sector": sector_name,
@@ -94,58 +169,32 @@ def fetch_sector_stocks(sector_name):
                     "health_score": None,
                     "health_rating": "⚪ No Data"
                 })
+
                 continue
 
-            latest = data.iloc[-1]
+        # Calculate volatility
+        if stock["lastPrice"] is not None and stock["dayHigh"] is not None and stock["dayLow"] is not None:
+            stock["volatility"] = (stock["dayHigh"] - stock["dayLow"]) / stock["lastPrice"]
+        else:
+            stock["volatility"] = None
+
+
+        # Momentum placeholder
+        stock["momentum"] = 0
+
+        # Health score
+        if stock["lastPrice"] is not None and stock["totalTradedVolume"] is not None and stock["volatility"] is not None:
+            stock["health_score"] = (
+                (1 - stock["volatility"]) * 0.4 +
+                (stock["momentum"] / 100) * 0.3 +
+                0.3  # simplified volume factor
+            )
+        else:
+            stock["health_score"] = None
+
+        stock["health_rating"] = rate_health(stock["health_score"])
+        results.append(stock)
             
-   
-            stock = {
-                "symbol": ticker,
-                "Sector": sector_name,
-                "lastPrice": safe_scalar(latest["Close"]),
-                "dayHigh": safe_scalar(latest["High"]),
-                "dayLow": safe_scalar(latest["Low"]),
-                "totalTradedVolume": safe_scalar(latest["Volume"])
-            }
-
-            # Calculate volatility
-            if stock["lastPrice"] is not None and stock["dayHigh"] is not None and stock["dayLow"] is not None:
-                stock["volatility"] = (stock["dayHigh"] - stock["dayLow"]) / stock["lastPrice"]
-            else:
-                stock["volatility"] = None
-
-
-            # Momentum placeholder
-            stock["momentum"] = 0
-
-            # Health score
-            if stock["lastPrice"] is not None and stock["totalTradedVolume"] is not None and stock["volatility"] is not None:
-                stock["health_score"] = (
-                    (1 - stock["volatility"]) * 0.4 +
-                    (stock["momentum"] / 100) * 0.3 +
-                    0.3  # simplified volume factor
-                )
-            else:
-                stock["health_score"] = None
-
-            stock["health_rating"] = rate_health(stock["health_score"])
-            results.append(stock)
-
-        except Exception as e:
-            st.warning(f"⚠️ Error fetching {ticker}: {e}")
-            results.append({
-                "symbol": ticker,
-                "Sector": sector_name,
-                "lastPrice": None,
-                "dayHigh": None,
-                "dayLow": None,
-                "totalTradedVolume": None,
-                "volatility": None,
-                "momentum": None,
-                "health_score": None,
-                "health_rating": "⚪ No Data"
-            })
-
     return pd.DataFrame(results)
     
 def safe_scalar(val):
@@ -207,10 +256,15 @@ def normalize_health_scores(df):
 
     df["health_rating"] = df["health_score_norm"].apply(rate_health)
     return df
-
+    
 # Streamlit UI
 st.set_page_config(page_title="NSE Midcap Dashboard (Yahoo)", layout="wide")
 st.title("📈 NSE Midcap Dashboard (Yahoo Finance Data)")
+
+# Manual refresh button at the very top
+if st.button("🔄 Manual Refresh"):
+    st.cache_data.clear()   # clear cached data
+    st.rerun()              # force rerun safely
 
 # Auto-refresh every 15 minutes
 st_autorefresh(interval=900000, limit=None, key="refresh")
@@ -219,9 +273,34 @@ sector_options = sorted(df_constituents["Sector"].dropna().unique())
 default_sectors = sector_options[:2] if len(sector_options) >= 2 else sector_options
 selected_sectors = st.multiselect("Select sectors to track:", sector_options, default=default_sectors)
 
+refresh_needed, refresh_time = refresh_controller()
+
+if refresh_needed:
+    stocks = fetch_midcap_data()
+    sectors = fetch_sector_data(selected_sectors)
+    combined = pd.DataFrame()
+    st.session_state["sector_stocks_map"] = {}  # reset map
+
+    for sector in selected_sectors:
+        sector_stocks = fetch_sector_stocks(sector)
+        st.session_state["sector_stocks_map"][sector] = sector_stocks
+        combined = pd.concat([combined, sector_stocks])
+
+    st.session_state["last_stocks"] = stocks
+    st.session_state["last_sectors"] = sectors
+    st.session_state["last_combined"] = combined
+else:
+    stocks = st.session_state.get("last_stocks", pd.DataFrame())
+    sectors = st.session_state.get("last_sectors", pd.DataFrame())
+    combined = st.session_state.get("last_combined", pd.DataFrame())
+
+if "last_refresh_time" in st.session_state:
+    st.caption(f"🕒 Last refresh: {st.session_state['last_refresh_time']}")
+
+
 # Main dashboard
-stocks = fetch_midcap_data()
-sectors = fetch_sector_data(selected_sectors)
+#stocks = fetch_midcap_data()
+#sectors = fetch_sector_data(selected_sectors)
 
 st.subheader("📊 Market Health Snapshot")
 st.dataframe(stocks)
@@ -241,18 +320,40 @@ st.plotly_chart(fig_sector, use_container_width=True)
 show_last_refresh("Sector Price Change")
 
 
-combined = pd.DataFrame()
+#combined = pd.DataFrame()
 for sector in selected_sectors:
     st.subheader(f"📊 {sector}")
-    sector_stocks = fetch_sector_stocks(sector)
+    sector_stocks = st.session_state["sector_stocks_map"].get(sector) #fetch_sector_stocks(sector)
+    if sector_stocks is None:
+        sector_stocks = fetch_sector_stocks(sector)
+        combined = pd.concat([combined, sector_stocks])
     st.dataframe(sector_stocks)
     show_last_refresh(f"{sector}")
-    combined = pd.concat([combined, sector_stocks])
+    
 
 if not combined.empty:
     combined = normalize_health_scores(combined)
+    combined = combined.drop_duplicates(subset=["symbol"]).reset_index(drop=True)
+    
+    # Calculate % change for each stock (if open price available)
+    # For simplicity, use dayHigh/dayLow vs lastPrice as proxy
+    combined["perChange"] = None
+    if "dayLow" in combined.columns and "dayHigh" in combined.columns and "lastPrice" in combined.columns:
+        combined["perChange"] = (
+            (combined["lastPrice"] - combined["dayLow"]) / combined["dayLow"] * 100
+        ).round(2)
+
     st.subheader("📋 Combined Summary of All Selected Sectors (Normalized Health)")
     st.dataframe(combined)
+
+    # 🔥 Highest Gainers & Losers
+    st.subheader("🚀 Top Gainers")
+    gainers = combined.sort_values(by="perChange", ascending=False).head(5)
+    st.dataframe(gainers[["symbol", "Sector", "lastPrice", "perChange", "health_rating"]])
+
+    st.subheader("📉 Top Losers")
+    losers = combined.sort_values(by="perChange", ascending=True).head(5)
+    st.dataframe(losers[["symbol", "Sector", "lastPrice", "perChange", "health_rating"]])
 
     st.subheader("🔥 Normalized Health Scores Across Sectors")
     fig_health = px.bar(combined, x="symbol", y="health_score_norm",
